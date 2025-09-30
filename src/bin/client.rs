@@ -14,12 +14,12 @@ const PLAYOUT_DELAY_MS: u64 = 150;
 const ACK_BITMAP_SIZE: usize = 64;
 
 fn build_ack(cumulative: u32, bitmap: u64) -> Vec<u8> {
-    let mut v = Vec::with_capacity(14);
-    v.push(0x02u8); // ACK type
-    v.push(0u8);    // reserved
-    v.extend_from_slice(&cumulative.to_be_bytes());
-    v.extend_from_slice(&bitmap.to_be_bytes());
-    v
+    let mut p = Vec::with_capacity(14);
+    p.push(0x02u8); 
+    p.push(0u8);   
+    p.extend_from_slice(&cumulative.to_be_bytes());
+    p.extend_from_slice(&bitmap.to_be_bytes());
+    p
 }
 
 fn main() -> std::io::Result<()> {
@@ -33,26 +33,20 @@ fn main() -> std::io::Result<()> {
     let shared_buf: Arc<Mutex<BTreeMap<u32, (Vec<u8>, u64)>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let shared_expected: Arc<Mutex<u32>> = Arc::new(Mutex::new(0u32));
 
-    // Playout thread: reads from buffer in order with playout delay and writes to file
     {
         let buf_clone = Arc::clone(&shared_buf);
         let exp_clone = Arc::clone(&shared_expected);
         thread::spawn(move || {
             let mut out = File::create("reception_playout.bin").expect("create file");
             loop {
-                // playout policy: wait PLAYOUT_DELAY_MS after timestamp then write contiguous packets
-                // find expected seq
                 let mut expected = { *exp_clone.lock().unwrap() };
-                // try to pop contiguous packets
                 loop {
                     let mut removed = None;
                     {
                         let mut guard = buf_clone.lock().unwrap();
                         if let Some((payload, ts)) = guard.get(&expected) {
-                            // ensure enough delay has passed since reception timestamp to smooth jitter
                             let now_ms = Utc::now().timestamp_millis() as u64;
                             if now_ms >= *ts + PLAYOUT_DELAY_MS {
-                                // write payload
                                 if let Err(e) = out.write_all(payload) {
                                     eprintln!("write err: {:?}", e);
                                 }
@@ -107,9 +101,7 @@ fn main() -> std::io::Result<()> {
             Err(e) => eprintln!("recv err: {:?}", e),
         }
 
-        // compute cumulative and bitmap and send ACK periodically or when new data arrives
         if last_ack_time.elapsed() > Duration::from_millis(ACK_INTERVAL_MS) {
-            // compute cumulative contiguous
             let mut cumulative = {
                 let g = recv_buf.lock().unwrap();
                 let mut expected = *expected_seq.lock().unwrap();

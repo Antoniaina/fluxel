@@ -9,6 +9,7 @@ const SERVER_BIND: &'static str = "127.0.0.1:4000";
 const CLIENT_ADDR: &'static str = "127.0.0.1:50000";
 const WINDOW_SIZE: usize = 256 ;
 const PAYLOAD_SIZE: usize = 1000;
+const RETRANS_TIMEOUT_MS: u64 = 250;
 
 //type(1) + flags(1) + stream_id(2) + seq(4) + timestamp(8) + len_packet(2) + payload(len_packet)
 fn make_data_packet(stream_id: u16, seq: u32, timestamp: u64, payload: &[u8]) -> Vec<u8> {
@@ -42,7 +43,7 @@ fn log(level: &str, source: &str, message: &str) {
 }
 
 
-fn main() {
+fn main() -> std::io::Result<()> {
     log("INFO", "fluxel", "Fluxel Server starting...");
     let socket = UdpSocket::bind(SERVER_BIND).unwrap();
     socket.connect(CLIENT_ADDR).unwrap();
@@ -73,7 +74,7 @@ fn main() {
         }
 
         match socket.recv(&mut buf_recv) {
-            Ok(r) => {
+            Ok(_) => {
                 if let Some((cumulative, bitmap)) = parse_ack(&buf_recv) {
                     log("DEBUG", "recv", &format!("ACK received: cumulative={}, bitmap={:064b}", cumulative, bitmap));
 
@@ -89,7 +90,7 @@ fn main() {
                         let bit = (bitmap >> i) & 1u64;
                         if bit == 0 {
                             if let Some((packet, _, _)) = send_buffer.get(&seq) {
-                                socket.send(packet);    
+                                let _ = socket.send(packet);    
                                 log("INFO", "retransmit", &format!("Retransmit (per bitmap) seq={}", seq));
 
                             }
@@ -100,18 +101,39 @@ fn main() {
                             entry.2 += 1;
                         }
                     }
-
-
-
-
-
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => log("ERROR", "recv", &format!("Receive error: {:?}", e)),
 
         }
+
+        let now = Instant::now();
+        let mut to_retrans: Vec<u32> = Vec::new();
+
+        for (k, (_pkt, sent_time, _attempt)) in send_buffer.iter() {
+            if now.duration_since(*sent_time) > Duration::from_millis(RETRANS_TIMEOUT_MS) {
+                to_retrans.push(*k);
+            }
+        }
+
+        for k in to_retrans {
+            if let Some((packet, sent_time, attempts)) = send_buffer.get_mut(&k) {
+                let _ = socket.send(&packet);
+                *sent_time = Instant::now();
+                *attempts += 1;
+                log("WARN", "retransmit", &format!("Retrans timeout -> resent seq={} attempts={}", k, attempts));
+
+            }
+        }
+
+        if read_eof && send_buffer.is_empty() {
+            log("INFO", "server", "All sent & acked. Exiting server.");
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
     }
 
-    // Ok(())
+    Ok(())
 } 
